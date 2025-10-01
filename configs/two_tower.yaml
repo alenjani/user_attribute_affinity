@@ -1,0 +1,20 @@
+# configs/two_tower.yaml
+
+training:
+  # Data
+  train_ratio: 0.8
+  batch_size: 256
+  negatives_per_pos: 5
+  
+  # Model architecture
+  hh_hidden_dims: [128, 64]
+  output_dim: 64
+  dropout: 0.2
+  freeze_attr_embeddings: true  # Don't fine-tune attribute embeddings
+  
+  # Training
+  epochs: 10
+  lr: 0.001
+  
+  # Evaluation
+  top_k: [10, 20, 50]  # For Precision@K, Recall@K

@@ -1,0 +1,43 @@
+# configs/providers.yaml (UPDATED)
+
+providers:
+  # Co-occurrence Autoencoder (Item-level)
+  - name: cooc_ae_item
+    model_version: "cooc_ae_item_2025-09-30"
+    config:
+      source: "item"
+      latent_dim: 64
+      hidden_dim: 256
+      epochs: 40
+      noise_prob: 0.2
+      pmi_shift: 1.0
+      lr: 0.001
+      batch_size: 256
+
+  # Co-occurrence Autoencoder (Household-level)
+  - name: cooc_ae_hh
+    model_version: "cooc_ae_hh_2025-09-30"
+    config:
+      source: "household"
+      latent_dim: 64
+      hidden_dim: 256
+      epochs: 40
+      noise_prob: 0.2
+      pmi_shift: 1.0
+      lr: 0.001
+      batch_size: 256
+
+  # Graph Contrastive Learning (NEW)
+  - name: gcl
+    model_version: "gcl_2025-09-30"
+    config:
+      dim: 64                    # Output embedding dimension
+      hidden_dim: 128            # Hidden layer dimension
+      n_layers: 3                # Number of GNN layers
+      drop_edge_prob: 0.2        # Edge dropout probability
+      drop_feat_prob: 0.1        # Feature masking probability
+      temperature: 0.5           # Contrastive loss temperature
+      epochs: 100                # Training epochs
+      lr: 0.001                  # Learning rate
+      batch_size: 256            # (not used in GCL, kept for consistency)
+      use_household_edges: true  # Include household-level co-occurrence

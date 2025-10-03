@@ -1,120 +1,114 @@
-# two_tower/model.py
+# two_tower/model.py (MODIFIED - ADD NEW CLASS)
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class TwoTowerModel(nn.Module):
+# Keep existing TwoTowerModel class for reference
+# Add new class:
+
+class ItemAttributeAlignmentModel(nn.Module):
     """
-    Two-Tower model for household-attribute affinity.
+    Aligns attribute embeddings to frozen item embedding space.
     
     Architecture:
-    - Household Tower: MLP that processes household purchase profile
-    - Attribute Tower: Optional projection of attribute embeddings
-    - Dot product similarity between towers
+    - Item Tower: FROZEN (just pass through)
+    - Attribute Tower: Trainable MLP for alignment
     """
     
     def __init__(
         self,
-        attr_embed_dim: int,
-        hh_hidden_dims: list = [128, 64],
+        item_embed_dim: int = 64,
+        attr_embed_dim: int = 64,
+        hidden_dim: int = 128,
         output_dim: int = 64,
-        dropout: float = 0.2,
-        freeze_attr_embeddings: bool = True
+        dropout: float = 0.2
     ):
         """
         Args:
+            item_embed_dim: Dimension of frozen item embeddings
             attr_embed_dim: Dimension of attribute embeddings (from provider)
-            hh_hidden_dims: Hidden layer dimensions for household tower
-            output_dim: Final embedding dimension (both towers)
+            hidden_dim: Hidden layer size for alignment network
+            output_dim: Final aligned dimension (should match item_embed_dim)
             dropout: Dropout probability
-            freeze_attr_embeddings: If True, don't fine-tune attribute embeddings
         """
         super().__init__()
         
+        self.item_embed_dim = item_embed_dim
         self.attr_embed_dim = attr_embed_dim
         self.output_dim = output_dim
-        self.freeze_attr_embeddings = freeze_attr_embeddings
         
-        # Household Tower
-        hh_layers = []
-        prev_dim = attr_embed_dim
+        # Item tower: Just pass through (frozen embeddings)
+        # No parameters needed
         
-        for hidden_dim in hh_hidden_dims:
-            hh_layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.ReLU(),
-                nn.BatchNorm1d(hidden_dim),
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
+        # Attribute alignment network (trainable)
+        self.attr_alignment = nn.Sequential(
+            nn.Linear(attr_embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(dropout),
+            
+            nn.Linear(hidden_dim, output_dim)
+        )
         
-        # Final projection to output_dim
-        hh_layers.append(nn.Linear(prev_dim, output_dim))
-        
-        self.household_tower = nn.Sequential(*hh_layers)
-        
-        # Attribute Tower (optional projection)
-        if attr_embed_dim != output_dim:
-            self.attribute_projection = nn.Linear(attr_embed_dim, output_dim)
-        else:
-            self.attribute_projection = nn.Identity()
-        
-        # Temperature parameter for scaling logits (learnable)
+        # Temperature parameter for scaling logits
         self.temperature = nn.Parameter(torch.tensor(0.07))
     
-    def forward_household(self, hh_profile: torch.Tensor) -> torch.Tensor:
+    def forward_item(self, item_embedding: torch.Tensor) -> torch.Tensor:
         """
-        Encode household profile.
+        Item tower (frozen - just normalize).
         
         Args:
-            hh_profile: [batch, attr_embed_dim] - aggregated purchase history
+            item_embedding: [batch, item_embed_dim] - frozen embeddings
         
         Returns:
-            hh_embedding: [batch, output_dim]
+            item_embedding_normalized: [batch, output_dim]
         """
-        hh_embedding = self.household_tower(hh_profile)
+        # Detach to ensure no gradients flow to frozen embeddings
+        item_emb = item_embedding.detach()
+        
         # L2 normalize
-        hh_embedding = F.normalize(hh_embedding, p=2, dim=-1)
-        return hh_embedding
+        item_emb = F.normalize(item_emb, p=2, dim=-1)
+        
+        return item_emb
     
     def forward_attribute(self, attr_embedding: torch.Tensor) -> torch.Tensor:
         """
-        Encode attribute.
+        Attribute alignment tower (trainable).
         
         Args:
             attr_embedding: [batch, attr_embed_dim] or [batch, k, attr_embed_dim]
         
         Returns:
-            attr_embedding_proj: [batch, output_dim] or [batch, k, output_dim]
+            attr_embedding_aligned: [batch, output_dim] or [batch, k, output_dim]
         """
-        if self.freeze_attr_embeddings:
-            attr_embedding = attr_embedding.detach()
+        # Align to item space
+        attr_aligned = self.attr_alignment(attr_embedding)
         
-        attr_embedding_proj = self.attribute_projection(attr_embedding)
         # L2 normalize
-        attr_embedding_proj = F.normalize(attr_embedding_proj, p=2, dim=-1)
-        return attr_embedding_proj
+        attr_aligned = F.normalize(attr_aligned, p=2, dim=-1)
+        
+        return attr_aligned
     
     def forward(
-        self, 
-        hh_profile: torch.Tensor, 
-        pos_attr: torch.Tensor, 
+        self,
+        item_embedding: torch.Tensor,
+        pos_attr: torch.Tensor,
         neg_attrs: torch.Tensor
     ) -> torch.Tensor:
         """
         Forward pass for contrastive learning.
         
         Args:
-            hh_profile: [batch, attr_embed_dim]
+            item_embedding: [batch, item_embed_dim] - frozen
             pos_attr: [batch, attr_embed_dim]
             neg_attrs: [batch, k_neg, attr_embed_dim]
         
         Returns:
             logits: [batch, 1 + k_neg] - similarity scores
         """
-        # Encode household
-        hh_emb = self.forward_household(hh_profile)  # [batch, output_dim]
+        # Encode item (frozen)
+        item_emb = self.forward_item(item_embedding)  # [batch, output_dim]
         
         # Encode positive attribute
         pos_emb = self.forward_attribute(pos_attr)   # [batch, output_dim]
@@ -123,8 +117,8 @@ class TwoTowerModel(nn.Module):
         neg_embs = self.forward_attribute(neg_attrs) # [batch, k_neg, output_dim]
         
         # Compute similarities (dot product)
-        pos_logit = (hh_emb * pos_emb).sum(dim=-1, keepdim=True)  # [batch, 1]
-        neg_logits = torch.bmm(neg_embs, hh_emb.unsqueeze(-1)).squeeze(-1)  # [batch, k_neg]
+        pos_logit = (item_emb * pos_emb).sum(dim=-1, keepdim=True)  # [batch, 1]
+        neg_logits = torch.bmm(neg_embs, item_emb.unsqueeze(-1)).squeeze(-1)  # [batch, k_neg]
         
         # Concatenate: [positive, negatives]
         logits = torch.cat([pos_logit, neg_logits], dim=-1)  # [batch, 1 + k_neg]
@@ -135,24 +129,24 @@ class TwoTowerModel(nn.Module):
         return logits
     
     def compute_affinity(
-        self, 
-        hh_profile: torch.Tensor, 
+        self,
+        item_embeddings: torch.Tensor,
         attr_embeddings: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute affinity scores between households and attributes (inference).
+        Compute affinity scores between items and attributes (inference).
         
         Args:
-            hh_profile: [batch_hh, attr_embed_dim]
-            attr_embeddings: [n_attrs, attr_embed_dim]
+            item_embeddings: [batch_item, item_embed_dim] - frozen
+            attr_embeddings: [n_attrs, attr_embed_dim] - from provider
         
         Returns:
-            affinity_scores: [batch_hh, n_attrs]
+            affinity_scores: [batch_item, n_attrs]
         """
-        hh_emb = self.forward_household(hh_profile)          # [batch_hh, output_dim]
+        item_emb = self.forward_item(item_embeddings)        # [batch_item, output_dim]
         attr_embs = self.forward_attribute(attr_embeddings)  # [n_attrs, output_dim]
         
-        # Dot product: [batch_hh, n_attrs]
-        affinity_scores = torch.mm(hh_emb, attr_embs.T)
+        # Dot product: [batch_item, n_attrs]
+        affinity_scores = torch.mm(item_emb, attr_embs.T)
         
         return affinity_scores

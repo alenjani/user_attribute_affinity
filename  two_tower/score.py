@@ -1,4 +1,4 @@
-# two_tower/score.py
+# two_tower/score.py (COMPLETELY REWRITTEN)
 
 import torch
 import pandas as pd
@@ -7,12 +7,12 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import Dict
 
-from .model import TwoTowerModel
-from .dataset import HouseholdAttributeDataset
+from .model import ItemAttributeAlignmentModel  # CHANGED
+from .frozen_embeddings import load_frozen_item_embeddings  # NEW
 
-def score_household_attribute_affinity(
+def score_item_attribute_affinity(  # RENAMED function
     model_path: str,
-    hh_attr_history_path: str,
+    frozen_item_embeddings_path: str,  # CHANGED from hh_attr_history_path
     attr_embeddings_path: str,
     provider: str,
     model_version: str,
@@ -21,27 +21,34 @@ def score_household_attribute_affinity(
     batch_size: int = 1024
 ):
     """
-    Generate household-attribute affinity scores for all households.
+    Generate item-attribute affinity scores for all items.
     
     Args:
-        model_path: Path to trained two-tower model (.pt file)
-        hh_attr_history_path: Path to household history
+        model_path: Path to trained alignment model (.pt file)
+        frozen_item_embeddings_path: Path to frozen item embeddings from Phase 1
         attr_embeddings_path: Path to attribute embeddings
         provider: Provider name
         model_version: Model version
         output_path: Where to save results
-        top_k: Keep top-K attributes per household
+        top_k: Keep top-K attributes per item
         batch_size: Batch size for inference
     """
     
     print("="*60)
-    print("Generating Household-Attribute Affinity Scores")
+    print("Generating Item-Attribute Affinity Scores")
     print("="*60)
     
     # Load data
     print("\n📂 Loading data...")
-    hh_attr_history = pd.read_parquet(hh_attr_history_path)
     
+    # Load frozen item embeddings (CHANGED)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    frozen_item_embeddings = load_frozen_item_embeddings(
+        frozen_item_embeddings_path, 
+        device=device
+    )
+    
+    # Load attribute embeddings (SAME)
     attr_emb_df = pd.read_parquet(attr_embeddings_path)
     attr_emb_df = attr_emb_df[
         (attr_emb_df['provider'] == provider) & 
@@ -56,15 +63,20 @@ def score_household_attribute_affinity(
     attr_ids = list(attr_embeddings.keys())
     attr_embed_matrix = np.stack([attr_embeddings[aid] for aid in attr_ids])
     
-    print(f"   {len(hh_attr_history['household_id'].unique())} households")
+    print(f"   {len(frozen_item_embeddings)} items")
     print(f"   {len(attr_embeddings)} attributes")
     
     # Load model
     print("\n🏗️  Loading model...")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     attr_embed_dim = attr_embed_matrix.shape[1]
-    model = TwoTowerModel(attr_embed_dim=attr_embed_dim)
+    item_embed_dim = len(next(iter(frozen_item_embeddings.values())))
+    
+    model = ItemAttributeAlignmentModel(  # CHANGED model class
+        item_embed_dim=item_embed_dim,
+        attr_embed_dim=attr_embed_dim,
+        output_dim=64
+    )
     model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
     model.eval()
@@ -72,53 +84,37 @@ def score_household_attribute_affinity(
     print(f"   Model loaded from {model_path}")
     print(f"   Device: {device}")
     
-    # Build household profiles
-    print("\n🔨 Building household profiles...")
-    household_profiles = {}
-    
-    for hh_id, group in hh_attr_history.groupby('household_id'):
-        attrs = []
-        weights = []
-        
-        for _, row in group.iterrows():
-            attr_id = row['attr_id']
-            if attr_id in attr_embeddings:
-                attrs.append(attr_id)
-                weights.append(row['hist_score'])
-        
-        if len(attrs) > 0:
-            # Weighted average of attribute embeddings
-            weights = np.array(weights)
-            weights = weights / weights.sum()
-            
-            embeddings = np.stack([attr_embeddings[attr] for attr in attrs])
-            hh_profile = np.average(embeddings, weights=weights, axis=0)
-            
-            household_profiles[hh_id] = hh_profile
-    
-    print(f"   Built {len(household_profiles)} household profiles")
+    # NO LONGER BUILD HOUSEHOLD PROFILES ❌
+    # Items already have embeddings - just use them directly
     
     # Compute affinity scores
     print("\n🎯 Computing affinity scores...")
     
-    all_hh_ids = list(household_profiles.keys())
+    all_item_ids = list(frozen_item_embeddings.keys())
     attr_embed_tensor = torch.FloatTensor(attr_embed_matrix).to(device)
     
     results = []
     
     # Process in batches
-    for i in tqdm(range(0, len(all_hh_ids), batch_size)):
-        batch_hh_ids = all_hh_ids[i:i+batch_size]
-        batch_profiles = np.stack([household_profiles[hh_id] for hh_id in batch_hh_ids])
-        batch_profiles = torch.FloatTensor(batch_profiles).to(device)
+    for i in tqdm(range(0, len(all_item_ids), batch_size)):
+        batch_item_ids = all_item_ids[i:i+batch_size]
+        
+        # Get frozen item embeddings for this batch (CHANGED)
+        batch_item_embeddings = np.stack([
+            frozen_item_embeddings[item_id] for item_id in batch_item_ids
+        ])
+        batch_item_embeddings = torch.FloatTensor(batch_item_embeddings).to(device)
         
         with torch.no_grad():
-            # Compute affinity: [batch_hh, n_attrs]
-            affinity_scores = model.compute_affinity(batch_profiles, attr_embed_tensor)
+            # Compute affinity: [batch_items, n_attrs]
+            affinity_scores = model.compute_affinity(
+                batch_item_embeddings,  # CHANGED: items instead of households
+                attr_embed_tensor
+            )
             affinity_scores = affinity_scores.cpu().numpy()
         
-        # For each household, keep top-K attributes
-        for j, hh_id in enumerate(batch_hh_ids):
+        # For each item, keep top-K attributes (CHANGED)
+        for j, item_id in enumerate(batch_item_ids):
             scores = affinity_scores[j]
             
             # Get top-K indices
@@ -126,7 +122,7 @@ def score_household_attribute_affinity(
             
             for rank, idx in enumerate(top_k_indices):
                 results.append({
-                    'household_id': hh_id,
+                    'item_id': item_id,  # CHANGED from household_id
                     'attr_id': attr_ids[idx],
                     'affinity_score': scores[idx],
                     'rank': rank + 1
@@ -143,8 +139,8 @@ def score_household_attribute_affinity(
     
     # Summary stats
     print("\n📊 Summary Statistics:")
-    print(f"   Households scored: {results_df['household_id'].nunique()}")
+    print(f"   Items scored: {results_df['item_id'].nunique()}")  # CHANGED
     print(f"   Unique attributes: {results_df['attr_id'].nunique()}")
-    print(f"   Avg attributes per household: {len(results_df) / results_df['household_id'].nunique():.1f}")
+    print(f"   Avg attributes per item: {len(results_df) / results_df['item_id'].nunique():.1f}")  # CHANGED
     
     return results_df

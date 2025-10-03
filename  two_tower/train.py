@@ -14,8 +14,9 @@ from tqdm import tqdm
 from .model import TwoTowerModel
 from .dataset import create_dataloaders
 
-def train_two_tower(
-    hh_attr_history_path: str,
+def train_item_attribute_alignment(
+    map_item_attr_path: str,
+    frozen_item_model_path: str,        # NEW: path to frozen item embeddings
     attr_embeddings_path: str,
     provider: str,
     model_version: str,
@@ -23,12 +24,13 @@ def train_two_tower(
     config: Dict[str, Any]
 ) -> Dict[str, float]:
     """
-    Train two-tower model.
+    Train item-attribute alignment model.
     
     Args:
-        hh_attr_history_path: Path to household-attribute history
+        map_item_attr_path: Path to item-attribute mappings
+        frozen_item_model_path: Path to previous HH-Item model (for frozen item embeddings)
         attr_embeddings_path: Path to vector store (attr_embeddings.parquet)
-        provider: Provider name to load (e.g., 'cooc_ae_item')
+        provider: Provider name to load (e.g., 'gcl')
         model_version: Model version to load
         output_dir: Directory to save model and metrics
         config: Training configuration
@@ -49,7 +51,10 @@ def train_two_tower(
     
     # 1. Load data
     print("\n📂 Loading data...")
-    hh_attr_history = pd.read_parquet(hh_attr_history_path)
+    map_item_attr = pd.read_parquet(map_item_attr_path)
+    
+    # Load frozen item embeddings (NEW)
+    frozen_item_embeddings = load_frozen_item_embeddings(frozen_item_model_path, device=device)
     
     # Load attribute embeddings
     attr_emb_df = pd.read_parquet(attr_embeddings_path)
@@ -63,33 +68,31 @@ def train_two_tower(
         for _, row in attr_emb_df.iterrows()
     }
     
-    attr_embed_dim = len(next(iter(attr_embeddings.values())))
-    
-    print(f"   Loaded {len(hh_attr_history)} hh-attr interactions")
+    print(f"   Loaded {len(map_item_attr)} item-attr mappings")
+    print(f"   Loaded {len(frozen_item_embeddings)} frozen item embeddings")
     print(f"   Loaded {len(attr_embeddings)} attribute embeddings")
-    print(f"   Attribute embedding dim: {attr_embed_dim}")
     
     # 2. Create dataloaders
     print("\n📊 Creating dataloaders...")
     train_loader, val_loader = create_dataloaders(
-        hh_attr_history,
+        map_item_attr,
+        frozen_item_embeddings,
         attr_embeddings,
         train_ratio=config.get('train_ratio', 0.8),
         batch_size=config.get('batch_size', 256),
         negatives_per_pos=config.get('negatives_per_pos', 5)
     )
     
-    # 3. Create model
+    # 3. Create model (use new ItemAttributeAlignmentModel)
     print("\n🏗️  Creating model...")
-    model = TwoTowerModel(
-        attr_embed_dim=attr_embed_dim,
-        hh_hidden_dims=config.get('hh_hidden_dims', [128, 64]),
-        output_dim=config.get('output_dim', 64),
-        dropout=config.get('dropout', 0.2),
-        freeze_attr_embeddings=config.get('freeze_attr_embeddings', True)
+    model = ItemAttributeAlignmentModel(
+        item_embed_dim=64,  # Frozen embeddings dimension
+        attr_embed_dim=64,  # Attribute embeddings dimension
+        hidden_dim=config.get('hidden_dim', 128),
+        output_dim=64,
+        dropout=config.get('dropout', 0.2)
     )
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
     
     print(f"   Device: {device}")

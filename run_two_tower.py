@@ -4,6 +4,8 @@ import yaml
 import argparse
 from pathlib import Path
 from two_tower.train import train_two_tower
+from two_tower.train import train_item_attribute_alignment  # NEW import name
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -14,8 +16,10 @@ def main():
     args = parser.parse_args()
     
     # Paths
-    HH_ATTR_HISTORY_PATH = f"{args.data_path}/hh_attr_history.parquet"
+    MAP_ITEM_ATTR_PATH = f"{args.data_path}/map_item_attribute.parquet"  # CHANGED
+    FROZEN_ITEM_MODEL_PATH = config['frozen_item_model_path']  # NEW
     ATTR_EMBEDDINGS_PATH = f"{args.models_path}/attr_embeddings.parquet"
+
     
     # Get model version from providers.yaml
     with open("configs/providers.yaml") as f:
@@ -39,9 +43,11 @@ def main():
     # Train
     print(f"\n🚀 Training Two-Tower with provider: {args.provider}")
     print(f"   Model version: {model_version}")
-    
-    metrics = train_two_tower(
-        hh_attr_history_path=HH_ATTR_HISTORY_PATH,
+
+    # Train (call new function)
+    metrics = train_item_attribute_alignment(  # NEW function name
+        map_item_attr_path=MAP_ITEM_ATTR_PATH,
+        frozen_item_model_path=FROZEN_ITEM_MODEL_PATH,  # NEW
         attr_embeddings_path=ATTR_EMBEDDINGS_PATH,
         provider=args.provider,
         model_version=model_version,
